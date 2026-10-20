@@ -132,20 +132,83 @@ La CLI retorna código distinto de cero si una fase falla y nunca escribe el `.a
 
 ## Ejecución en MARS 4.5
 
-Descarga el JAR desde el [sitio oficial de MARS](https://dpetersanderson.github.io/) y ejecuta:
+MARS es una herramienta externa y no se incluye dentro del repositorio. En el equipo de desarrollo, el archivo está ubicado en:
+
+```text
+C:\Herramientas\Mars4_5.jar
+```
+
+Antes de continuar, verifica que Java y el JAR estén disponibles:
+
+```powershell
+java -version
+Test-Path -LiteralPath "C:\Herramientas\Mars4_5.jar"
+```
+
+`Test-Path` debe devolver `True`. Si el archivo no está presente, descarga MARS 4.5 desde el [sitio oficial](https://dpetersanderson.github.io/) y colócalo en esa ruta.
+
+### Opción 1: configurar MARS en la sesión actual
+
+Ejecuta estas instrucciones en la misma ventana de PowerShell desde la que utilizarás el proyecto:
 
 ```powershell
 $env:MARS_JAR = "C:\Herramientas\Mars4_5.jar"
+Test-Path -LiteralPath $env:MARS_JAR
 npm.cmd run mars -- .\programa.asm
 ```
 
-O directamente:
+La asignación con `$env:MARS_JAR` es temporal: se pierde al cerrar esa ventana de PowerShell.
+
+### Opción 2: guardar la ubicación permanentemente
+
+Ejecuta una sola vez:
 
 ```powershell
-java -jar C:\Herramientas\Mars4_5.jar nc ae1 .\programa.asm
+[Environment]::SetEnvironmentVariable(
+    "MARS_JAR",
+    "C:\Herramientas\Mars4_5.jar",
+    "User"
+)
+```
+
+Cierra PowerShell, abre una terminal nueva y comprueba la configuración:
+
+```powershell
+$env:MARS_JAR
+Test-Path -LiteralPath $env:MARS_JAR
+npm.cmd run mars -- .\programa.asm
+```
+
+### Opción 3: pasar el JAR directamente
+
+Esta opción no requiere configurar ninguna variable:
+
+```powershell
+npm.cmd run mars -- .\programa.asm "C:\Herramientas\Mars4_5.jar"
+```
+
+También puede invocarse MARS sin el script de npm:
+
+```powershell
+java -jar "C:\Herramientas\Mars4_5.jar" nc ae1 .\programa.asm
 ```
 
 `nc` omite el banner y `ae1` devuelve código 1 si el ensamblado falla.
+
+### Prueba completa con el factorial recursivo
+
+Primero genera el ensamblador desde Compiscript y después ejecútalo en MARS:
+
+```powershell
+npm.cmd run cli -- .\examples\mips\07_recursion.cps --mode mips --out .\factorial.asm
+$env:MARS_JAR = "C:\Herramientas\Mars4_5.jar"
+npm.cmd run mars -- .\factorial.asm
+```
+
+El resultado esperado es `120`.
+
+> [!TIP]
+> Si aparece `No se encontró MARS: ...\tools\Mars4_5.jar`, el script no recibió la nueva ubicación y utilizó su ruta predeterminada. Define `$env:MARS_JAR` en la terminal actual o proporciona `"C:\Herramientas\Mars4_5.jar"` como segundo argumento, como se muestra arriba.
 
 ## Ejemplos
 
