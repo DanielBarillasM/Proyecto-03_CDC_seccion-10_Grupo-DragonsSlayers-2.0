@@ -37,6 +37,7 @@ import type { SemanticAnalysisResult } from "../lib/types";
 import type { ScopeInfo, ScopeKind } from "../semantic/scopes";
 import type { SymbolEntry } from "../semantic/symbols";
 import { T, type SemanticType } from "../semantic/semanticTypes";
+import { commonType } from "../semantic/typeSystem";
 import { LabelFactory, TemporaryAllocator, type Temporary } from "./allocators";
 import { buildTacControlFlow } from "./controlFlow";
 import {
@@ -82,11 +83,7 @@ function alignUp(value: number, alignment: number): number {
 }
 
 function storageSize(type: SemanticType): number {
-  if (type.kind !== "primitive") return 8;
-  if (type.name === "boolean") return 1;
-  if (type.name === "integer") return 4;
-  if (type.name === "void") return 0;
-  return 8;
+  return type.kind === "primitive" && type.name === "void" ? 0 : 4;
 }
 
 function storageAlignment(type: SemanticType): number {
@@ -124,7 +121,7 @@ class TacGenerator {
   run(): TacGenerationResult {
     try {
       this.emit("PROGRAM_BEGIN", {}, this.program);
-      this.program.statement().forEach((statement) => this.statement(statement));
+      this.statements(this.program.statement());
       this.emit("PROGRAM_END", {}, this.program);
       this.temps.endFrame(this.currentFrameId);
       this.finalizeFrames();
@@ -311,6 +308,11 @@ class TacGenerator {
     }
   }
 
+  private statements(statements: StatementContext[]): void {
+    statements.filter((statement) => statement.functionDeclaration()).forEach((statement) => this.statement(statement));
+    statements.filter((statement) => !statement.functionDeclaration()).forEach((statement) => this.statement(statement));
+  }
+
   private variableDeclaration(ctx: VariableDeclarationContext): void {
     const initializer = ctx.initializer();
     if (!initializer) return;
@@ -328,7 +330,7 @@ class TacGenerator {
   }
 
   private block(ctx: BlockContext, kind: ScopeKind, name: string): void {
-    this.withScope(kind, name, ctx, () => ctx.statement().forEach((statement) => this.statement(statement)));
+    this.withScope(kind, name, ctx, () => this.statements(ctx.statement()));
   }
 
   private ifStatement(ctx: IfStatementContext): void {
@@ -449,7 +451,7 @@ class TacGenerator {
       this.release(length);
       this.emit("IF_FALSE", { arg1: condition, result: tacOperand(endLabel, "label") }, ctx);
       this.release(condition);
-      const item = this.temp(T.unknown);
+      const item = this.temp(iterable.type?.kind === "array" ? iterable.type.element : T.unknown);
       this.emit("ARRAY_GET", { arg1: iterable, arg2: index, result: item }, ctx);
       this.emit("MOV", {
         arg1: item,
@@ -485,7 +487,7 @@ class TacGenerator {
       this.emit("CATCH_BEGIN", {
         result: this.symbolOperand(this.resolveSymbol(ctx.Identifier().text), ctx.Identifier().text)
       }, ctx);
-      ctx.block(1).statement().forEach((statement) => this.statement(statement));
+      this.statements(ctx.block(1).statement());
     });
     this.emit("LABEL", { result: tacOperand(endLabel, "label") }, ctx);
   }
@@ -508,12 +510,12 @@ class TacGenerator {
       this.breakTargets.push(endLabel);
       ctx.switchCase().forEach((switchCase, index) => {
         this.emit("LABEL", { result: tacOperand(caseLabels[index], "label") }, switchCase);
-        switchCase.statement().forEach((statement) => this.statement(statement));
+        this.statements(switchCase.statement());
       });
       const defaultCase = ctx.defaultCase();
       if (defaultCase) {
         this.emit("LABEL", { result: tacOperand(defaultLabel, "label") }, defaultCase);
-        defaultCase.statement().forEach((statement) => this.statement(statement));
+        this.statements(defaultCase.statement());
       }
       this.breakTargets.pop();
       this.emit("LABEL", { result: tacOperand(endLabel, "label") }, ctx);
@@ -535,9 +537,11 @@ class TacGenerator {
     this.currentFrameId = this.frameIdByScope.get(functionScope.id) ?? `frame-${functionScope.id}`;
     this.temps.beginFrame(this.currentFrameId);
     const functionOperand = this.symbolOperand(symbol, name);
+    const frame = this.frameById.get(this.currentFrameId);
+    if (frame && symbol?.type.kind === "function") frame.returnType = symbol.type.returnType;
     this.emit("FUNC_BEGIN", { result: functionOperand }, ctx);
     prologue?.();
-    ctx.block().statement().forEach((statement) => this.statement(statement));
+    this.statements(ctx.block().statement());
     const last = this.instructions[this.instructions.length - 1];
     if (last?.op !== "RETURN") this.emit("RETURN", {}, ctx.block());
     this.emit("FUNC_END", { result: functionOperand }, ctx);
@@ -553,6 +557,7 @@ class TacGenerator {
       const captures = functionFrame?.slots.filter((slot) => slot.kind === "captured") ?? [];
       captures.forEach((capture, captureIndex) => {
         const capturedSymbol = this.semantic.symbols.find((candidate) => candidate.id === capture.symbolId);
+        if (capturedSymbol?.storage?.frameId !== this.currentFrameId && capturedSymbol) this.ensureCapture(capturedSymbol);
         this.emit("CAPTURE", {
           arg1: this.symbolOperand(capturedSymbol, capture.name),
           result: { kind: "constant", value: captureIndex }
@@ -604,7 +609,8 @@ class TacGenerator {
     className: string,
     initializeFields: (owner?: TacOperand) => void
   ): void {
-    const layout = this.classLayouts.find((candidate) => candidate.name === className);
+    const classType = this.resolveSymbol(className)?.type;
+    const layout = this.classLayouts.find((candidate) => classType?.kind === "class" && candidate.classId === classType.classId);
     const constructor = layout?.methods?.find((method) => method.name === "constructor");
     if (!layout || !constructor) return;
 
@@ -628,7 +634,7 @@ class TacGenerator {
       offset += size;
       return operand;
     };
-    const owner = addParameter("this", T.instance(className));
+    const owner = addParameter("this", T.instance(className, layout.classId));
     const forwardedParameters = parameters.map((parameter) => addParameter(parameter.name, parameter.type));
 
     this.frameById.set(frameId, {
@@ -700,6 +706,7 @@ class TacGenerator {
     this.emit("GOTO", { arg1: tacOperand(endLabel, "label") }, ctx);
     this.emit("LABEL", { result: tacOperand(falseLabel, "label") }, ctx);
     const whenFalse = this.expression(branches[1]);
+    result.type = commonType([whenTrue.type ?? T.unknown, whenFalse.type ?? T.unknown]) ?? T.unknown;
     this.emit("MOV", { arg1: whenFalse, result }, branches[1]);
     this.release(whenFalse);
     this.emit("LABEL", { result: tacOperand(endLabel, "label") }, ctx);
@@ -860,21 +867,25 @@ class TacGenerator {
     const result = this.temp(T.array(T.unknown));
     const values = ctx.expression();
     this.emit("NEW_ARRAY", { arg1: tacOperand(values.length), result }, ctx);
+    const elementTypes: SemanticType[] = [];
     values.forEach((expression, index) => {
       const value = this.expression(expression);
+      elementTypes.push(value.type ?? T.unknown);
       this.emit("ARRAY_SET", { arg1: result, arg2: tacOperand(index), result: value }, expression);
       this.release(value);
     });
+    result.type = T.array(commonType(elementTypes) ?? T.unknown);
     return result;
   }
 
   private primaryAtom(ctx: PrimaryAtomContext): TacOperand {
     if (ctx.NEW()) {
       const className = ctx.Identifier()?.text ?? "<clase>";
-      const result = this.temp(T.instance(className));
+      const classType = this.resolveSymbol(className)?.type;
+      const result = this.temp(T.instance(className, classType?.kind === "class" ? classType.classId : className));
       const args = ctx.arguments()?.expression() ?? [];
       const constructorLabel = this.classLayouts
-        .find((layout) => layout.name === className)
+        .find((layout) => classType?.kind === "class" && layout.classId === classType.classId)
         ?.methods?.find((method) => method.name === "constructor")?.label ?? `${className}.constructor`;
       this.emit("NEW_OBJECT", { arg1: tacOperand(className, "symbol"), arg2: tacOperand(args.length), result }, ctx);
       this.emit("PARAM", { arg1: result }, ctx);
@@ -911,7 +922,8 @@ class TacGenerator {
 
   private applyMethodCall(base: TacOperand, property: SuffixOperatorContext, call: SuffixOperatorContext): TacOperand {
     const methodName = property.Identifier()?.text ?? "<método>";
-    const callable = this.temp(T.unknown);
+    const methodType = this.memberType(base.type, methodName);
+    const callable = this.temp(methodType.kind === "function" ? T.fn([base.type ?? T.unknown, ...methodType.params], methodType.returnType) : methodType);
     this.emit("GET_FIELD", { arg1: base, arg2: tacOperand(methodName, "symbol"), result: callable }, property);
     this.emit("PARAM", { arg1: base }, property);
     const args = call.arguments()?.expression() ?? [];
@@ -920,7 +932,7 @@ class TacGenerator {
       this.emit("PARAM", { arg1: value }, argument);
       this.release(value);
     }
-    const result = this.temp(T.unknown);
+    const result = this.temp(methodType.kind === "function" ? methodType.returnType : T.unknown);
     this.emit("CALL", { arg1: callable, arg2: tacOperand(args.length + 1), result }, call);
     this.release(callable);
     this.release(base);
@@ -952,10 +964,19 @@ class TacGenerator {
       return result;
     }
     const field = suffix.Identifier()?.text ?? "<campo>";
-    const result = this.temp(T.unknown);
+    const result = this.temp(this.memberType(base.type, field));
     this.emit("GET_FIELD", { arg1: base, arg2: tacOperand(field, "symbol"), result }, suffix);
     this.release(base);
     return result;
+  }
+
+  private memberType(type: SemanticType | undefined, name: string): SemanticType {
+    const classId = type?.kind === "instance" || type?.kind === "class" ? type.classId : undefined;
+    const layout = this.classLayouts.find((candidate) => candidate.classId === classId);
+    const field = layout?.fields.find((candidate) => candidate.name === name);
+    if (field) return field.type;
+    const method = layout?.methods?.find((candidate) => candidate.name === name);
+    return this.semantic.symbols.find((symbol) => symbol.id === method?.symbolId)?.type ?? T.unknown;
   }
 
   private lvalue(ctx: LeftHandSideContext): LValue {
@@ -1055,7 +1076,8 @@ class TacGenerator {
       }
       visiting.add(classSymbol.id);
       const parent = classSymbol.parentClass
-        ? classes.find((candidate) => candidate.id === classSymbol.parentClass || candidate.name === classSymbol.parentClass)
+        ? classes.find((candidate) => candidate.id === classSymbol.parentClass || (candidate.type.kind === "class" && candidate.type.classId === classSymbol.parentClass))
+          ?? this.resolveSymbol(classSymbol.parentClass, classSymbol.scopeId)
         : undefined;
       const parentLayout = parent ? build(parent, visiting) : undefined;
       const fields = parentLayout ? parentLayout.fields.map((field) => ({ ...field })) : [];
@@ -1074,7 +1096,7 @@ class TacGenerator {
         offset += size;
       }
       for (const method of ownMembers.filter((symbol) => symbol.kind === "method")) {
-        const label = `fn_${classSymbol.name}_${method.name}`;
+        const label = `fn_${classSymbol.id}_${classSymbol.name}_${method.name}`;
         method.storage = { kind: "function", label };
         const inherited = methods.findIndex((entry) => entry.name === method.name);
         const entry = {
@@ -1091,7 +1113,7 @@ class TacGenerator {
         const inheritedConstructor = inherited >= 0 ? methods[inherited] : undefined;
         const implicitConstructor = {
           name: "constructor",
-          label: `fn_${classSymbol.name}_constructor`,
+          label: `fn_${classSymbol.id}_${classSymbol.name}_constructor`,
           parameters: inheritedConstructor?.parameters?.map((parameter) => ({ ...parameter })) ?? []
         };
         if (inherited >= 0) methods[inherited] = implicitConstructor;
@@ -1140,7 +1162,7 @@ class TacGenerator {
       const parentScope = scope.parentId ? this.scopeById.get(scope.parentId) : undefined;
       const ownedSymbols = this.semantic.symbols
         .filter((symbol) =>
-          ALLOCATABLE_SYMBOLS.has(symbol.kind) &&
+          (ALLOCATABLE_SYMBOLS.has(symbol.kind) || (symbol.kind === "function" && this.scopeById.get(symbol.scopeId)?.kind !== "global")) &&
           nearestFrameScope(symbol.scopeId)?.id === scope.id &&
           symbol.kind !== "field"
         )
@@ -1158,13 +1180,14 @@ class TacGenerator {
         const kind: FrameSlot["kind"] = symbol.kind === "parameter" ? "parameter" : "local";
         const storageKind = scope.kind === "global" ? "global" : kind;
         symbol.storage = {
+          ...symbol.storage,
           kind: storageKind,
           frameId: `frame-${scope.id}`,
           offset,
           size,
           alignment
         };
-        slots.push({ name: symbol.name, symbolId: symbol.id, kind, type: symbol.type, offset, size, alignment });
+        slots.push({ name: symbol.name, symbolId: symbol.id, kind, type: symbol.type, offset, size, alignment, sharedCell: symbol.captured });
         offset += size;
       }
       const kind: ActivationRecord["kind"] = scope.kind === "global"

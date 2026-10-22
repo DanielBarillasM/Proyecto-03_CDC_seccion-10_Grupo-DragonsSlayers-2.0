@@ -31,6 +31,8 @@ FloatLiteral : [0-9]+ '.' [0-9]+;
 
 Además se permite promoción segura `integer -> float` en asignaciones y operaciones numéricas. No se permite la conversión implícita inversa `float -> integer`.
 
+El operador `%` solo admite operandos `integer`. El resto con `float` produce `SEM004` y bloquea TAC/MIPS hasta que exista una implementación flotante.
+
 ## 4. Política de `switch`
 
 Los requisitos describen `switch` junto a las estructuras cuyas condiciones deben ser booleanas, pero los ejemplos oficiales del lenguaje utilizan `switch (x)` con casos enteros. Para mantener coherencia con la sintaxis y comportamiento mostrado por Compiscript, el analizador acepta como discriminante de `switch`:
@@ -86,6 +88,8 @@ Las clases se hoistean únicamente dentro del entorno que contiene su declaraci�
 
 Cuando una función anidada referencia una variable declarada en el ámbito de una función externa, el símbolo se marca con `captured: true`. La tabla de símbolos y las métricas de la UI permiten observar estas capturas.
 
+El backend reserva una celda de heap compartida por cada símbolo capturado. El propietario y todos sus closures leen y escriben esa misma celda, incluso después del retorno del propietario. Las funciones capturadas también usan celdas para permitir recursión y referencias adelantadas. Todos los valores de función apuntan a un descriptor con dirección de código y punteros a las celdas capturadas.
+
 ## 10. Clases y miembros
 
 La fase de declaraciones construye información de clases, herencia, campos y métodos. Durante el análisis:
@@ -101,6 +105,8 @@ Los tipos de instancia incluyen la identidad de la declaración de clase, no sol
 ## 11. Arreglos
 
 Los literales deben ser homogéneos bajo las reglas de compatibilidad de tipos. El índice debe ser `integer` y solo los arreglos pueden indexarse. `foreach` obtiene el tipo de su variable de iteración desde el tipo de elemento del arreglo.
+
+MIPS comprueba referencias nulas y exige `0 <= índice < longitud` antes de acceder a un elemento. Una referencia nula o un índice inválido muestra un error de runtime y termina el programa, sin efectuar el acceso.
 
 ## 12. Código inalcanzable
 

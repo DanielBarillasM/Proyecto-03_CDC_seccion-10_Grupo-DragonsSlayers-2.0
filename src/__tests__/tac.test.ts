@@ -150,7 +150,7 @@ describe("TAC core", () => {
       "class A { let x: integer = 1; } let a: A = new A(); print(a.x);",
       "tac"
     );
-    const constructorLabel = "fn_A_constructor";
+    const constructorLabel = result.tac.classLayouts.find((layout) => layout.name === "A")!.methods!.find((method) => method.name === "constructor")!.label;
     const definedFunctions = new Set(
       result.tac.instructions
         .filter((instruction) => instruction.op === "FUNC_BEGIN")
@@ -198,9 +198,9 @@ describe("TAC core", () => {
     );
 
     expect(result.tac.status).toBe("completed");
-    expect(definedFunctions).toContain("fn_Base_constructor");
-    expect(definedFunctions).toContain("fn_Child_constructor");
-    expect(calls).toEqual(expect.arrayContaining(["fn_Base_constructor", "fn_Child_constructor"]));
+    const constructorLabels = result.tac.classLayouts.map((layout) => layout.methods!.find((method) => method.name === "constructor")!.label);
+    constructorLabels.forEach((label) => expect(definedFunctions).toContain(label));
+    expect(calls).toEqual(expect.arrayContaining(constructorLabels));
     expect(childFieldInitialization?.arg1?.value).toBe("this");
   });
 });

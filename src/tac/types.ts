@@ -60,6 +60,7 @@ export interface TacDiagnostic {
 }
 
 export interface FrameSlot {
+  sharedCell?: boolean;
   name: string;
   symbolId?: string;
   temporary?: string;
@@ -71,6 +72,7 @@ export interface FrameSlot {
 }
 
 export interface ActivationRecord {
+  returnType?: SemanticType;
   id: string;
   name: string;
   kind: "global" | "function" | "method" | "constructor";

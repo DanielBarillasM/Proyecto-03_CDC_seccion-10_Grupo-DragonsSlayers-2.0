@@ -56,7 +56,7 @@ export function ExportsPanel({ result, inputText }: ExportsPanelProps) {
           {
             label: "Reporte MIPS",
             icon: <FileText size={14} />,
-            action: () => downloadText("reporte_mips.txt", mipsReport(result.tac))
+            action: () => downloadText("reporte_mips.txt", mipsReport(result.mips))
           }
         ]
       : []),

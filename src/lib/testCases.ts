@@ -59,7 +59,7 @@ export interface TestRunOutcome {
 }
 
 export function runTestCase(testCase: TestCase): TestRunOutcome {
-  const result = analyzeInput(testCase.source, testCase.phase === "tac" ? "tac" : "semantic");
+  const result = analyzeInput(testCase.source, testCase.phase === "rubric" ? "semantic" : testCase.phase);
   const notes: string[] = [];
   const { expectation } = testCase;
 

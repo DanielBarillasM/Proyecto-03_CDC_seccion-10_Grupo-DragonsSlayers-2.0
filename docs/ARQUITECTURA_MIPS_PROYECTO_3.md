@@ -39,6 +39,8 @@ La UI solo habilita **Descargar .asm** en `completed`. De este modo, tener texto
 
 Los slots del frame global se convierten en etiquetas `.word` del segmento `.data`. Las constantes de cadena se internan como `.asciiz` y las flotantes como `.float` alineado.
 
+Cada valor no vacío ocupa una palabra alineada de cuatro bytes, incluidos booleanos, referencias y punteros a celdas capturadas.
+
 ### Funciones
 
 Cada invocación crea un registro de activación real sobre la pila:
@@ -46,6 +48,7 @@ Cada invocación crea un registro de activación real sobre la pila:
 ```text
 direcciones altas
 ├─ argumentos del llamador
+├─ $s7 del llamador guardado antes de cambiar de entorno
 ├─ $ra guardado
 ├─ $fp anterior
 ├─ $s7 anterior (entorno del closure)
@@ -57,6 +60,8 @@ direcciones bajas
 El prólogo alinea el tamaño del frame, mueve `$fp` y copia los argumentos hacia los offsets definidos en `ActivationRecord`. El epílogo restaura `$s7`, `$ra`, `$fp`, libera la pila y retorna con `jr $ra`.
 
 Los parámetros se apilan de izquierda a derecha. Una llamada consume solo la cantidad declarada por su `CALL`; esto preserva argumentos externos durante llamadas anidadas como `obj.método(f(x))`.
+
+El llamador convierte argumentos `integer` a `float` según la firma y restaura su propio `$s7` después de cada llamada. El retorno usa el tipo declarado o inferido de la función, no solo el del operando.
 
 ## Asignación de registros
 
@@ -90,9 +95,13 @@ Las operaciones flotantes usan registros `$f2`, `$f4`, `$f6`, `$f12` y `$f0`. La
 
 Un arreglo reserva `(longitud + 1) * 4` bytes. El primer word conserva la longitud; el elemento `i` se encuentra en `4 * (i + 1)`.
 
-Un objeto reserva al menos `ClassLayout.instanceSize`. `GET_FIELD` y `SET_FIELD` usan el offset resuelto durante TAC. Un método se materializa como dirección de etiqueta y se invoca con `jalr`; el receptor se pasa como primer parámetro.
+Las lecturas y escrituras verifican referencia no nula y `0 <= i < longitud` antes de calcular la dirección. La lectura de longitud también verifica nulos. Un fallo imprime un diagnóstico y termina antes de acceder a memoria.
 
-Un closure reserva un bloque cuyo word 0 es el puntero de función. Las capturas comienzan en el word 1. Al invocarlo, `$s7` apunta al entorno; `LOAD_CAPTURE` y `STORE_CAPTURE` acceden a sus offsets. El frame guarda/restaura `$s7`, lo que permite anidamiento y recursión.
+Un objeto reserva al menos `ClassLayout.instanceSize`. `GET_FIELD` y `SET_FIELD` usan el offset resuelto durante TAC. Los layouts y las etiquetas distinguen la identidad de cada declaración, incluso entre clases homónimas. Un método se materializa como descriptor de función y se invoca con `jalr`; el receptor se pasa como primer parámetro.
+
+Todo valor de función usa un descriptor cuyo word 0 es la dirección de código. Las funciones sin capturas usan descriptores estáticos; los closures reservan descriptores en heap. Desde el word 1 se guardan punteros a celdas compartidas, no copias de los valores. El propietario reserva estas celdas al entrar en la función y tanto el propietario como sus closures acceden al mismo contenido. Las capturas transitivas conservan los punteros originales.
+
+Al invocar un descriptor, `$s7` apunta al entorno; `LOAD_CAPTURE` y `STORE_CAPTURE` desreferencian la celda correspondiente. Las declaraciones de funciones se emiten antes de las demás instrucciones de su ámbito para mantener hoisting y recursión.
 
 ## Runtime de cadenas
 
@@ -116,7 +125,7 @@ El resultado conserva ensamblador previo y posterior, además del contador de el
 
 ## Validación
 
-Antes de marcar el resultado como completo se verifica que las etiquetas referidas por `j`, `jal`, ramas y `la` estén definidas. La suite cubre el backend de forma unitaria y la auditoría ejecuta los artefactos en MARS 4.5 real.
+Antes de marcar el resultado como completo se verifica que las etiquetas referidas por `j`, `jal`, ramas y `la` estén definidas. La suite cubre el backend de forma unitaria y ejecuta regresiones de salida en MARS 4.5 real. `npm run mars:setup` descarga el JAR oficial y verifica su SHA-256. CI usa `REQUIRE_MARS=1` para impedir que se omitan estas pruebas por falta del simulador.
 
 ```powershell
 npm.cmd run cli -- examples/mips/07_recursion.cps --mode mips --out factorial.asm

@@ -40,12 +40,10 @@ export function buildTacControlFlow(instructions: TacInstruction[]): TacControlF
     }
   }
 
-  const starts = [...leaders].sort((left, right) => left - right);
-  const blocks = starts.map((startIndex, position): TacBasicBlock => {
-    const endExclusive = starts[position + 1] ?? instructions.length;
-    const blockInstructions = instructions.filter(
-      (instruction) => instruction.index >= startIndex && instruction.index < endExclusive
-    );
+  const starts = instructions.flatMap((instruction, position) => leaders.has(instruction.index) ? [position] : []);
+  const blocks = starts.map((start, position): TacBasicBlock => {
+    const blockInstructions = instructions.slice(start, starts[position + 1] ?? instructions.length);
+    const startIndex = blockInstructions[0].index;
     const labelInstruction = blockInstructions.find((instruction) => instruction.op === "LABEL");
     return {
       id: `B${position}`,
@@ -62,14 +60,15 @@ export function buildTacControlFlow(instructions: TacInstruction[]): TacControlF
   }
 
   const edges: TacControlFlowEdge[] = [];
+  const instructionByIndex = new Map(instructions.map((instruction) => [instruction.index, instruction]));
   const addEdge = (from: TacBasicBlock, to: TacBasicBlock | undefined, kind: TacControlFlowEdge["kind"]): void => {
-    if (!to || edges.some((edge) => edge.from === from.id && edge.to === to.id && edge.kind === kind)) return;
+    if (!to) return;
     edges.push({ from: from.id, to: to.id, kind });
   };
 
   blocks.forEach((block, position) => {
     const lastIndex = block.instructionIndices[block.instructionIndices.length - 1];
-    const last = lastIndex === undefined ? undefined : instructions.find((instruction) => instruction.index === lastIndex);
+    const last = lastIndex === undefined ? undefined : instructionByIndex.get(lastIndex);
     if (!last) return;
 
     const target = branchTarget(last);

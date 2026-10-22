@@ -1138,6 +1138,9 @@ class SemanticAnalyzer extends AbstractParseTreeVisitor<SemanticTreeNode> implem
       const op = opsTexts[i - 1] as "*" | "/" | "%";
       const right = operands[i];
       const numeric = numericResult(acc.type, right.type);
+      if (op === "%" && numeric?.kind === "primitive" && numeric.name === "float") {
+        this.report("SEM004", "error", locOf(ctx), "El operador '%' solo admite operandos integer.");
+      }
       if (!numeric) {
         if (isMeaninglessOperand(acc.type) || isMeaninglessOperand(right.type)) {
           this.report(
@@ -1311,7 +1314,7 @@ class SemanticAnalyzer extends AbstractParseTreeVisitor<SemanticTreeNode> implem
     const currentFuncScope = this.functionStack[this.functionStack.length - 1]?.scopeId;
     if (!currentFuncScope) return;
     const declaredFuncScope = this.scopes.enclosingFunctionScope(symbol.scopeId);
-    if (declaredFuncScope && declaredFuncScope.id !== currentFuncScope && symbol.kind !== "function" && symbol.kind !== "class") {
+    if (declaredFuncScope && declaredFuncScope.id !== currentFuncScope && symbol.kind !== "class") {
       this.scopes.markCaptured(symbol.id);
     }
   }

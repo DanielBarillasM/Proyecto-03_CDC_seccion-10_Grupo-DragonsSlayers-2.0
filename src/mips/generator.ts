@@ -51,8 +51,6 @@ class Generator {
   private readonly synthetic = new Map<string, string>();
   private readonly strings = new Map<string, string>();
   private readonly floats = new Map<number, string>();
-  private readonly closures = new Set<string>();
-  private readonly rawFunctions = new Set<string>();
   private currentFrame?: ActivationRecord;
   private currentEpilogue?: string;
   private readonly functionContextStack: { frame?: ActivationRecord; epilogue?: string }[] = [];
@@ -60,9 +58,11 @@ class Generator {
   /** Cantidad de argumentos ya apilados pero aún no consumidos. Permite
    * llamadas anidadas: una CALL consume solo sus N argumentos superiores. */
   private parameters = 0;
+  private readonly parameterTypes: (SemanticType | undefined)[] = [];
   private serial = 0;
   private needsConcat = false;
   private needsStringEquality = false;
+  private needsArrayChecks = false;
 
   constructor(private readonly tac: TacGenerationResult) {
     tac.activationRecords.forEach((frame) => this.frames.set(frame.id, frame));
@@ -73,6 +73,7 @@ class Generator {
         if (frame) this.functions.set(String(instruction.result.value), frame);
       }
     });
+    for (const name of this.functions.keys()) this.data.push(`${safeLabel(name, "closure")}: .word ${safeLabel(name, "fn")}`);
     for (const frame of tac.activationRecords.filter((candidate) => candidate.kind === "global")) {
       for (const slot of frame.slots) {
         const label = safeLabel(`${frame.id}_${slot.symbolId ?? slot.temporary ?? slot.name}`, "mem");
@@ -161,8 +162,6 @@ class Generator {
 
   private move(i: TacInstruction): void {
     if (!i.arg1 || !i.result) return this.error("MIPS002", "MOV incompleto.", i);
-    if (this.closures.has(opKey(i.arg1))) this.closures.add(opKey(i.result));
-    else if (this.rawFunctions.has(opKey(i.arg1)) || (i.arg1.type?.kind === "function" && this.functions.has(String(i.arg1.value)))) this.rawFunctions.add(opKey(i.result));
     if (primitive(i.result.type, "float")) { this.loadFloat(i.arg1, "$f2", i); this.storeFloat("$f2", i.result, i); return; }
     const r = this.registers.getReg(); this.loadWord(i.arg1, r, i); this.storeWord(r, i.result, i);
   }
@@ -225,7 +224,11 @@ class Generator {
     const bytes = align(frame.totalBytes), allocation = bytes + 12;
     this.emit(`${safeLabel(raw, "fn")}:`, `  addiu $sp, $sp, -${allocation}`, `  sw $s7, ${bytes}($sp)`, `  sw $fp, ${bytes + 4}($sp)`, `  sw $ra, ${bytes + 8}($sp)`, "  move $fp, $sp");
     const params = frame.slots.filter((slot) => slot.kind === "parameter");
-    params.forEach((slot, index) => this.emit(`  lw $t8, ${allocation + (params.length - index - 1) * 4}($fp)`, `  sw $t8, ${slot.offset}($fp)`));
+    params.forEach((slot, index) => this.emit(`  lw $t8, ${allocation + 4 + (params.length - index - 1) * 4}($fp)`, `  sw $t8, ${slot.offset}($fp)`));
+    for (const slot of frame.slots.filter((candidate) => candidate.sharedCell)) {
+      this.emit(slot.kind === "parameter" ? `  lw $t8, ${slot.offset}($fp)` : "  move $t8, $zero",
+        "  li $a0, 4", "  li $v0, 9", "  syscall", "  sw $t8, 0($v0)", `  sw $v0, ${slot.offset}($fp)`);
+    }
   }
   private endFunction(): void {
     if (!this.currentFrame || !this.currentEpilogue) return;
@@ -239,6 +242,7 @@ class Generator {
     const r = this.registers.getReg();
     if (primitive(i.arg1.type, "float")) { this.loadFloat(i.arg1, "$f2", i); this.emit(`  mfc1 ${r}, $f2`); } else this.loadWord(i.arg1, r, i);
     this.emit("  addiu $sp, $sp, -4", `  sw ${r}, 0($sp)`); this.parameters += 1;
+    this.parameterTypes.push(i.arg1.type);
   }
   private call(i: TacInstruction): void {
     if (!i.arg1) return this.error("MIPS010", "CALL sin destino.", i);
@@ -246,23 +250,31 @@ class Generator {
     const expected = Number.isFinite(declared) ? Math.max(0, Math.trunc(declared)) : this.parameters;
     if (expected > this.parameters) this.error("MIPS101", `CALL requiere ${expected} parámetros, pero solo hay ${this.parameters} apilados.`, i);
     const raw = String(i.arg1.value);
-    const closure = this.closures.has(opKey(i.arg1)) || (i.arg1.type?.kind === "function" && !this.functions.has(raw) && !this.rawFunctions.has(opKey(i.arg1)));
-    if (this.functions.has(raw) && !closure && !this.synthetic.has(opKey(i.arg1))) this.emit("  move $s7, $zero", `  jal ${safeLabel(raw, "fn")}`, "  nop");
+    const formalTypes = i.arg1.type?.kind === "function" ? i.arg1.type.params : this.functions.get(raw)?.slots.filter((slot) => slot.kind === "parameter").map((slot) => slot.type) ?? [];
+    const actualTypes = this.parameterTypes.slice(-expected);
+    formalTypes.forEach((type, index) => {
+      if (primitive(type, "float") && !primitive(actualTypes[index], "float")) {
+        const offset = (expected - index - 1) * 4;
+        this.emit(`  lw $t8, ${offset}($sp)`, "  mtc1 $t8, $f2", "  cvt.s.w $f2, $f2", `  s.s $f2, ${offset}($sp)`);
+      }
+    });
+    this.emit("  addiu $sp, $sp, -4", "  sw $s7, 0($sp)");
+    if (this.functions.has(raw) && !this.findSlot(i.arg1)) this.emit("  move $s7, $zero", `  jal ${safeLabel(raw, "fn")}`, "  nop");
     else {
       const target = this.registers.getReg(); this.loadWord(i.arg1, target, i);
-      if (closure) this.emit(`  move $s7, ${target}`, `  lw $t9, 0(${target})`, "  jalr $t9", "  nop");
-      else this.emit("  move $s7, $zero", `  jalr ${target}`, "  nop");
+      this.emit(`  move $s7, ${target}`, `  lw $t9, 0(${target})`, "  jalr $t9", "  nop");
     }
+    this.emit("  lw $s7, 0($sp)", "  addiu $sp, $sp, 4");
     const consumed = Math.min(expected, this.parameters);
     if (consumed) this.emit(`  addiu $sp, $sp, ${consumed * 4}`);
     this.parameters -= consumed;
+    if (consumed) this.parameterTypes.splice(-consumed);
     if (i.result) {
       primitive(i.result.type, "float") ? this.storeFloat("$f0", i.result, i) : this.storeWord("$v0", i.result, i);
-      if (i.result.type?.kind === "function") this.closures.add(opKey(i.result));
     }
   }
   private returnValue(i: TacInstruction): void {
-    if (i.arg1) primitive(i.arg1.type, "float") ? this.loadFloat(i.arg1, "$f0", i) : this.loadWord(i.arg1, "$v0", i);
+    if (i.arg1) primitive(this.currentFrame?.returnType ?? i.arg1.type, "float") ? this.loadFloat(i.arg1, "$f0", i) : this.loadWord(i.arg1, "$v0", i);
     if (this.currentEpilogue) this.emit(`  j ${this.currentEpilogue}`, "  nop"); else this.error("MIPS011", "RETURN fuera de una función.", i);
   }
 
@@ -283,19 +295,24 @@ class Generator {
   }
   private arrayLength(i: TacInstruction): void {
     if (!i.arg1 || !i.result) return this.error("MIPS021", "ARRAY_LENGTH incompleto.", i);
-    const a = this.registers.getReg(), r = this.registers.getReg(); this.loadWord(i.arg1, a, i); this.emit(`  lw ${r}, 0(${a})`); this.storeWord(r, i.result, i);
+    const a = this.registers.getReg(), r = this.registers.getReg(); this.loadWord(i.arg1, a, i); this.checkArray(a); this.emit(`  lw ${r}, 0(${a})`); this.storeWord(r, i.result, i);
   }
   private arrayGet(i: TacInstruction): void {
     if (!i.arg1 || !i.arg2 || !i.result) return this.error("MIPS022", "ARRAY_GET incompleto.", i);
-    const a = this.registers.getReg(), n = this.registers.getReg(); this.loadWord(i.arg1, a, i); this.loadWord(i.arg2, n, i); this.emit(`  addiu ${n}, ${n}, 1`, `  sll ${n}, ${n}, 2`, `  addu ${a}, ${a}, ${n}`);
+    const a = this.registers.getReg(), n = this.registers.getReg(); this.loadWord(i.arg1, a, i); this.loadWord(i.arg2, n, i); this.checkArray(a, n); this.emit(`  addiu ${n}, ${n}, 1`, `  sll ${n}, ${n}, 2`, `  addu ${a}, ${a}, ${n}`);
     if (primitive(i.result.type, "float")) { this.emit(`  l.s $f2, 0(${a})`); this.storeFloat("$f2", i.result, i); }
     else { const r = this.registers.getReg(); this.emit(`  lw ${r}, 0(${a})`); this.storeWord(r, i.result, i); }
   }
   private arraySet(i: TacInstruction): void {
     if (!i.arg1 || !i.arg2 || !i.result) return this.error("MIPS023", "ARRAY_SET incompleto.", i);
-    const a = this.registers.getReg(), n = this.registers.getReg(); this.loadWord(i.arg1, a, i); this.loadWord(i.arg2, n, i); this.emit(`  addiu ${n}, ${n}, 1`, `  sll ${n}, ${n}, 2`, `  addu ${a}, ${a}, ${n}`);
-    if (primitive(i.result.type, "float")) { this.loadFloat(i.result, "$f2", i); this.emit(`  s.s $f2, 0(${a})`); }
+    const a = this.registers.getReg(), n = this.registers.getReg(); this.loadWord(i.arg1, a, i); this.loadWord(i.arg2, n, i); this.checkArray(a, n); this.emit(`  addiu ${n}, ${n}, 1`, `  sll ${n}, ${n}, 2`, `  addu ${a}, ${a}, ${n}`);
+    if (primitive(i.arg1.type?.kind === "array" ? i.arg1.type.element : i.result.type, "float")) { this.loadFloat(i.result, "$f2", i); this.emit(`  s.s $f2, 0(${a})`); }
     else { const r = this.registers.getReg(); this.loadWord(i.result, r, i); this.emit(`  sw ${r}, 0(${a})`); }
+  }
+  private checkArray(base: string, index?: string): void {
+    this.needsArrayChecks = true;
+    this.emit(`  beq ${base}, $zero, __rt_null_array`, "  nop");
+    if (index) this.emit(`  bltz ${index}, __rt_array_bounds`, "  nop", `  lw $t8, 0(${base})`, `  bge ${index}, $t8, __rt_array_bounds`, "  nop");
   }
   private newObject(i: TacInstruction): void {
     if (!i.result) return this.error("MIPS024", "NEW_OBJECT sin resultado.", i);
@@ -306,7 +323,7 @@ class Generator {
   private getField(i: TacInstruction): void {
     if (!i.arg1 || !i.arg2 || !i.result) return this.error("MIPS026", "GET_FIELD incompleto.", i);
     const layout = this.layout(i.arg1.type), name = String(i.arg2.value), method = layout?.methods?.find((candidate) => candidate.name === name);
-    if (method) { const r = this.registers.getReg(); this.emit(`  la ${r}, ${safeLabel(method.label, "fn")}`); this.rawFunctions.add(opKey(i.result)); this.storeWord(r, i.result, i); return; }
+    if (method) { const r = this.registers.getReg(); this.emit(`  la ${r}, ${safeLabel(method.label, "closure")}`); this.storeWord(r, i.result, i); return; }
     const field = layout?.fields.find((candidate) => candidate.name === name);
     if (!field) return this.error("MIPS027", `Campo o método desconocido: ${name}.`, i);
     const a = this.registers.getReg(); this.loadWord(i.arg1, a, i);
@@ -318,27 +335,43 @@ class Generator {
     const field = this.layout(i.arg1.type)?.fields.find((candidate) => candidate.name === String(i.arg2?.value));
     if (!field) return this.error("MIPS029", `Campo desconocido: ${String(i.arg2.value)}.`, i);
     const a = this.registers.getReg(); this.loadWord(i.arg1, a, i);
-    if (primitive(i.result.type, "float")) { this.loadFloat(i.result, "$f2", i); this.emit(`  s.s $f2, ${field.offset}(${a})`); }
+    if (primitive(field.type, "float")) { this.loadFloat(i.result, "$f2", i); this.emit(`  s.s $f2, ${field.offset}(${a})`); }
     else { const r = this.registers.getReg(); this.loadWord(i.result, r, i); this.emit(`  sw ${r}, ${field.offset}(${a})`); }
   }
 
   private makeClosure(i: TacInstruction): void {
     if (!i.arg1 || !i.result) return this.error("MIPS030", "MAKE_CLOSURE incompleto.", i);
-    let captures = 0; for (const candidate of this.tac.instructions.slice(i.index + 1)) { if (candidate.op !== "CAPTURE") break; captures += 1; }
+    let captures = 0;
+    while (this.tac.instructions[i.index + captures + 1]?.op === "CAPTURE") captures += 1;
     this.emit(`  li $a0, ${(captures + 1) * 4}`, "  li $v0, 9", "  syscall", `  la $t8, ${safeLabel(i.arg1.value, "fn")}`, "  sw $t8, 0($v0)"); this.storeWord("$v0", i.result, i);
-    this.closures.add(opKey(i.result)); this.activeClosure = i.result;
+    this.activeClosure = i.result;
   }
   private capture(i: TacInstruction): void {
     if (!this.activeClosure || !i.arg1 || !i.result) return this.error("MIPS031", "CAPTURE sin cierre activo.", i);
-    const c = this.registers.getReg(), v = this.registers.getReg(); this.loadWord(this.activeClosure, c, i); this.loadWord(i.arg1, v, i); this.emit(`  sw ${v}, ${(Number(i.result.value ?? 0) + 1) * 4}(${c})`);
+    const c = this.registers.getReg(), v = this.registers.getReg(); this.loadWord(this.activeClosure, c, i); this.loadCell(i.arg1, v, i); this.emit(`  sw ${v}, ${(Number(i.result.value ?? 0) + 1) * 4}(${c})`);
   }
   private loadCapture(i: TacInstruction): void {
     if (!i.result) return this.error("MIPS032", "LOAD_CAPTURE sin resultado.", i);
-    const r = this.registers.getReg(), index = Number(i.arg2?.value ?? i.arg1?.captureIndex ?? 0); this.emit(`  lw ${r}, ${(index + 1) * 4}($s7)`); this.storeWord(r, i.result, i);
+    const r = this.registers.getReg(), index = Number(i.arg2?.value ?? i.arg1?.captureIndex ?? 0); this.emit(`  lw ${r}, ${(index + 1) * 4}($s7)`, `  lw ${r}, 0(${r})`); this.storeWord(r, i.result, i);
   }
   private storeCapture(i: TacInstruction): void {
     if (!i.result) return this.error("MIPS033", "STORE_CAPTURE sin valor.", i);
-    const r = this.registers.getReg(), index = Number(i.arg2?.value ?? i.arg1?.captureIndex ?? 0); this.loadWord(i.result, r, i); this.emit(`  sw ${r}, ${(index + 1) * 4}($s7)`);
+    const r = this.registers.getReg(), index = Number(i.arg2?.value ?? i.arg1?.captureIndex ?? 0);
+    if (primitive(i.arg1?.type, "float")) { this.loadFloat(i.result, "$f2", i); this.emit(`  mfc1 ${r}, $f2`); }
+    else this.loadWord(i.result, r, i);
+    this.emit(`  lw $t9, ${(index + 1) * 4}($s7)`, `  sw ${r}, 0($t9)`);
+  }
+
+  private isCell(value: TacOperand): boolean {
+    return Boolean(this.findSlot(value)?.slot.sharedCell || this.currentFrame?.slots.some((slot) => slot.kind === "captured" && slot.symbolId === value.symbolId && value.symbolId));
+  }
+  private loadCell(value: TacOperand, register: string, i?: TacInstruction): void {
+    const captures = this.currentFrame?.slots.filter((slot) => slot.kind === "captured") ?? [];
+    const index = captures.findIndex((slot) => slot.symbolId === value.symbolId);
+    if (index >= 0) { this.emit(`  lw ${register}, ${(index + 1) * 4}($s7)`); return; }
+    const target = this.storage(value);
+    if (target) this.emit(`  lw ${register}, ${target}`);
+    else this.error("MIPS043", `No se resolvió la celda de ${String(value.value)}.`, i);
   }
 
   private loadWord(value: TacOperand, register: string, i?: TacInstruction): void {
@@ -350,21 +383,25 @@ class Generator {
       return;
     }
     if (value.kind === "label") { this.emit(`  la ${register}, ${safeLabel(value.value)}`); return; }
+    if (this.isCell(value)) { this.loadCell(value, register, i); this.emit(`  lw ${register}, 0(${register})`); return; }
     const target = this.storage(value);
     if (target) { this.emit(`  lw ${register}, ${target}`); return; }
-    if (value.type?.kind === "function" && this.functions.has(String(value.value))) { this.emit(`  la ${register}, ${safeLabel(value.value, "fn")}`); return; }
+    if (value.type?.kind === "function" && this.functions.has(String(value.value))) { this.emit(`  la ${register}, ${safeLabel(value.value, "closure")}`); return; }
     this.error("MIPS040", `No se resolvió almacenamiento para ${String(value.value)}.`, i); this.emit(`  move ${register}, $zero`);
   }
   private storeWord(register: string, value: TacOperand, i?: TacInstruction): void {
+    if (this.isCell(value)) { this.loadCell(value, "$t9", i); this.emit(`  sw ${register}, 0($t9)`); return; }
     const target = this.storage(value, true); if (!target) return this.error("MIPS041", `No se asignó almacenamiento para ${String(value.value)}.`, i); this.emit(`  sw ${register}, ${target}`);
   }
   private loadFloat(value: TacOperand, register: string, i?: TacInstruction): void {
     if (value.kind === "constant" && typeof value.value === "number") { this.emit(`  l.s ${register}, ${this.floatLabel(value.value)}`); return; }
+    if (this.isCell(value) && primitive(value.type, "float")) { this.loadWord(value, "$t8", i); this.emit(`  mtc1 $t8, ${register}`); return; }
     const target = this.storage(value);
     if (target && primitive(value.type, "float")) { this.emit(`  l.s ${register}, ${target}`); return; }
     const r = this.registers.getReg(); this.loadWord(value, r, i); this.emit(`  mtc1 ${r}, ${register}`, `  cvt.s.w ${register}, ${register}`);
   }
   private storeFloat(register: string, value: TacOperand, i?: TacInstruction): void {
+    if (this.isCell(value)) { this.loadCell(value, "$t9", i); this.emit(`  s.s ${register}, 0($t9)`); return; }
     const target = this.storage(value, true); if (!target) return this.error("MIPS042", `No se asignó almacenamiento flotante para ${String(value.value)}.`, i); this.emit(`  s.s ${register}, ${target}`);
   }
   private layout(type?: SemanticType): ClassLayout | undefined {
@@ -382,6 +419,11 @@ class Generator {
   }
 
   private runtime(): void {
+    if (this.needsArrayChecks) {
+      for (const [label, message] of [["__rt_null_array", "Runtime error: null array"], ["__rt_array_bounds", "Runtime error: array index out of bounds"]]) {
+        this.emit(`${label}:`, `  la $a0, ${this.stringLabel(message + "\n")}`, "  li $v0, 4", "  syscall", "  li $v0, 10", "  syscall");
+      }
+    }
     if (this.needsStringEquality) this.emit(
       "__rt_streq:", "  lbu $t8, 0($a0)", "  lbu $t9, 0($a1)", "  bne $t8, $t9, __rt_streq_false", "  nop", "  beq $t8, $zero, __rt_streq_true", "  nop", "  addiu $a0, $a0, 1", "  addiu $a1, $a1, 1", "  j __rt_streq", "  nop",
       "__rt_streq_false:", "  move $v0, $zero", "  jr $ra", "  nop", "__rt_streq_true:", "  li $v0, 1", "  jr $ra", "  nop");
@@ -431,7 +473,6 @@ export function generateMips(tac: TacGenerationResult): MipsGenerationResult {
   return new Generator(tac).generate();
 }
 
-export function mipsReport(tac: TacGenerationResult): string {
-  const result = generateMips(tac);
+export function mipsReport(result: MipsGenerationResult): string {
   return ["Reporte MIPS32 / MARS 4.5", `Estado: ${result.status}`, `Instrucciones antes de mirilla: ${result.instructionCount}`, `Instrucciones finales: ${result.optimizedInstructionCount}`, `Optimizaciones: ${result.optimizationCount}`, `Asignaciones getReg: ${result.registerStats.allocations}`, `Máximo simultáneo: ${result.registerStats.maxConcurrent}`, `Spills: ${result.registerStats.spills}`, `Diagnósticos: ${result.diagnostics.length}`, ...result.diagnostics.map((d) => `${d.severity.toUpperCase()} ${d.code}: ${d.message}`), "", result.assembly].join("\n");
 }
