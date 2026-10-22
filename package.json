@@ -38,7 +38,8 @@
     "cli:semantic-symbols": "tsx src/cli/run.ts examples/semantic/symbol_table_demo.cps --mode semantic",
     "cli:tac": "tsx src/cli/run.ts examples/tac/13_programa_integral.cps --mode tac",
     "cli:mips": "tsx src/cli/run.ts examples/mips/01_aritmetica.cps --mode mips",
-    "mars": "node scripts/run-mars.mjs"
+    "mars": "node scripts/run-mars.mjs",
+    "mars:setup": "node scripts/setup-mars.mjs"
   },
   "build": {
     "appId": "gt.edu.uvg.dlpantlr",

@@ -10,7 +10,7 @@ Compilador visual de Compiscript que recorre el frontend completo, genera TAC y 
 [![Versión](https://img.shields.io/badge/versi%C3%B3n-3.0.0-FFD426?style=for-the-badge&labelColor=111111)](package.json)
 [![ANTLR](https://img.shields.io/badge/ANTLR-4-FFD426?style=for-the-badge&labelColor=111111)](https://www.antlr.org/)
 [![MIPS](https://img.shields.io/badge/MIPS32-MARS%204.5-FFD426?style=for-the-badge&labelColor=111111)](https://dpetersanderson.github.io/)
-[![Tests](https://img.shields.io/badge/tests-176%20passing-32D583?style=for-the-badge&labelColor=111111)](#calidad-y-validación)
+[![Tests](https://img.shields.io/badge/tests-Vitest%20%2B%20MARS-32D583?style=for-the-badge&labelColor=111111)](#calidad-y-validación)
 [![License](https://img.shields.io/badge/license-MIT-FFD426?style=for-the-badge&labelColor=111111)](LICENSE)
 
 ![Pipeline del Proyecto 3](docs/assets/compiscript-project3-pipeline.svg)
@@ -74,7 +74,9 @@ Las funciones reservan un frame alineado, guardan `$s7`, `$fp` y `$ra`, copian l
 - `string`: direcciones a bytes terminados en cero, con rutinas de concatenación e igualdad;
 - arreglos: palabra de longitud seguida por elementos;
 - objetos: bloque de heap con offsets provenientes de `ClassLayout`;
-- closures: puntero a función en la primera palabra y capturas a continuación.
+- closures: dirección de código en la primera palabra y punteros a celdas compartidas a continuación;
+- arreglos: comprobaciones de nulos y límites antes de leer o escribir;
+- `%`: solo operandos `integer`; el resto flotante genera `SEM004`.
 
 ## Inicio rápido
 
@@ -131,6 +133,15 @@ npm.cmd run cli -- .\programa.cps --mode tac
 La CLI retorna código distinto de cero si una fase falla y nunca escribe el `.asm` cuando la compilación no es válida.
 
 ## Ejecución en MARS 4.5
+
+Para descargar la versión oficial reproducible dentro del proyecto:
+
+```powershell
+npm.cmd run mars:setup
+npm.cmd test
+```
+
+El comando verifica SHA-256 y guarda el JAR en `tools/Mars4_5.jar`, excluido de Git. La suite ejecuta las regresiones de salida cuando encuentra ese archivo o `MARS_JAR`. Sin JAR, esas pruebas se omiten; con `REQUIRE_MARS=1`, su ausencia hace fallar la suite. CI instala Java 17, descarga el JAR verificado y exige estas pruebas en cada pull request, push a `main` y release.
 
 MARS es una herramienta externa y no se incluye dentro del repositorio. En el equipo de desarrollo, el archivo está ubicado en:
 
@@ -238,22 +249,22 @@ Las carpetas `examples/compiscript`, `examples/semantic`, `examples/rubric` y `e
 | `npm.cmd run generate` | Regenera lexer, parser y Visitor desde ANTLR |
 | `npm.cmd run cli:mips` | Compila el ejemplo MIPS principal |
 | `npm.cmd run mars -- programa.asm [Mars4_5.jar]` | Ejecuta un `.asm` en MARS |
+| `npm.cmd run mars:setup` | Descarga MARS oficial y verifica SHA-256 |
 | `npm.cmd run desktop` | Compila y abre Electron |
 
 ## Calidad y validación
 
-Estado verificado de la versión 3.0.0:
+Validación automatizada:
 
 | Verificación | Resultado |
 | --- | ---: |
 | TypeScript `tsc --noEmit` | aprobado |
-| Pruebas automatizadas | **176 aprobadas en 13 archivos** |
-| Pruebas específicas MIPS | 8 |
-| Casos ejecutados en MARS 4.5 | 15 positivos |
+| Pruebas automatizadas | Vitest, frontend, TAC, MIPS y UI |
+| Pruebas específicas MIPS | Estructura del ensamblador y salidas de ejecución |
+| Casos ejecutados en MARS 4.5 | Tipos, promociones, closures, clases y errores de arreglos |
 | Programa integral | `2`, `6`, `12` |
 | Recursión | factorial `120` |
 | Closures | resultado `1` |
-| Auditoría npm de producción | 0 vulnerabilidades |
 | Build Vite | aprobado |
 
 La validación real usa el MARS 4.5 oficial en modo CLI, no un emulador inventado ni una comprobación basada solo en expresiones regulares.
@@ -291,7 +302,7 @@ La validación real usa el MARS 4.5 oficial en modo CLI, no un emulador inventad
 | macOS Intel/Apple Silicon | `npm run exe:mac` | `.zip` y `.dmg` sin firma |
 | Linux x64 | `npm run exe:linux` | `.AppImage` |
 
-El workflow de GitHub ejecuta `check`, pruebas, build, TAC y MIPS antes de empaquetar. Los targets macOS y Linux deben construirse en runners de sus sistemas respectivos.
+El workflow de GitHub ejecuta `check`, pruebas con MARS obligatorio, build, TAC y MIPS antes de empaquetar. La misma verificación se ejecuta en pull requests y cambios de `main`. Los targets macOS y Linux deben construirse en runners de sus sistemas respectivos.
 
 ## Documentación
 

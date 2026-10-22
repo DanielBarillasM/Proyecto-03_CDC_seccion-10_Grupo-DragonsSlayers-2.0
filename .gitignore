@@ -12,6 +12,8 @@ __v0_jsx-dev-runtime.ts
 
 # Common ignores
 node_modules
+tools/*.jar
+.mars-test-*/
 dist/
 release/
 .playwright-cli/
